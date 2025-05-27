@@ -405,10 +405,12 @@ func (ecNode *EcNode) localShardIdCount(vid uint32) int {
 func collectEcVolumeServersByDc(topo *master_pb.TopologyInfo, selectedDataCenter string) (ecNodes []*EcNode, totalFreeEcSlots int) {
 	eachDataNode(topo, func(dc DataCenterId, rack RackId, dn *master_pb.DataNodeInfo) {
 		if selectedDataCenter != "" && selectedDataCenter != string(dc) {
+			fmt.Printf("Skipping data center %s\n", selectedDataCenter)
 			return
 		}
 
 		freeEcSlots := countFreeShardSlots(dn, types.HardDriveType)
+		fmt.Printf("Free EC slots: %d for drive type %s\n", freeEcSlots, types.HardDriveType)
 		ecNodes = append(ecNodes, &EcNode{
 			info:       dn,
 			dc:         dc,
