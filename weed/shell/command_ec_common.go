@@ -1028,7 +1028,7 @@ func EcBalance(commandEnv *CommandEnv, collections []string, dc string, ecReplic
 		return err
 	}
 	if totalFreeEcSlots < 1 {
-		return fmt.Errorf("no free ec shard slots. only %d left", totalFreeEcSlots)
+		return fmt.Errorf("no free ec shard slots in dc `%s`. only %d left", dc, totalFreeEcSlots)
 	}
 
 	ecb := &ecBalancer{
