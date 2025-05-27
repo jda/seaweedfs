@@ -29,6 +29,7 @@ type EcNode struct {
 	info       *master_pb.DataNodeInfo
 	dc         DataCenterId
 	rack       RackId
+	diskType   types.DiskType
 	freeEcSlot int
 }
 type CandidateEcNode struct {
@@ -169,6 +170,10 @@ func collectTopologyInfo(commandEnv *CommandEnv, delayBeforeCollecting time.Dura
 }
 
 func collectEcNodesForDC(commandEnv *CommandEnv, selectedDataCenter string) (ecNodes []*EcNode, totalFreeEcSlots int, err error) {
+	return collectEcNodesForDCAndDiskType(commandEnv, selectedDataCenter, types.HardDriveType)
+}
+
+func collectEcNodesForDCAndDiskType(commandEnv *CommandEnv, selectedDataCenter string, diskType types.DiskType) (ecNodes []*EcNode, totalFreeEcSlots int, err error) {
 	// list all possible locations
 	// collect topology information
 	topologyInfo, _, err := collectTopologyInfo(commandEnv, 0)
@@ -176,8 +181,8 @@ func collectEcNodesForDC(commandEnv *CommandEnv, selectedDataCenter string) (ecN
 		return
 	}
 
-	// find out all volume servers with one slot left.
-	ecNodes, totalFreeEcSlots = collectEcVolumeServersByDc(topologyInfo, selectedDataCenter)
+	// find out all volume servers with one slot left for the specified disk type
+	ecNodes, totalFreeEcSlots = collectEcVolumeServersByDcAndDiskType(topologyInfo, selectedDataCenter, diskType)
 
 	sortEcNodesByFreeslotsDescending(ecNodes)
 
@@ -403,18 +408,23 @@ func (ecNode *EcNode) localShardIdCount(vid uint32) int {
 }
 
 func collectEcVolumeServersByDc(topo *master_pb.TopologyInfo, selectedDataCenter string) (ecNodes []*EcNode, totalFreeEcSlots int) {
+	return collectEcVolumeServersByDcAndDiskType(topo, selectedDataCenter, types.HardDriveType)
+}
+
+func collectEcVolumeServersByDcAndDiskType(topo *master_pb.TopologyInfo, selectedDataCenter string, diskType types.DiskType) (ecNodes []*EcNode, totalFreeEcSlots int) {
 	eachDataNode(topo, func(dc DataCenterId, rack RackId, dn *master_pb.DataNodeInfo) {
 		if selectedDataCenter != "" && selectedDataCenter != string(dc) {
 			fmt.Printf("Skipping data center %s\n", selectedDataCenter)
 			return
 		}
 
-		freeEcSlots := countFreeShardSlots(dn, types.HardDriveType)
-		fmt.Printf("Free EC slots: %d for drive type %s\n", freeEcSlots, types.HardDriveType)
+		freeEcSlots := countFreeShardSlots(dn, diskType)
+		fmt.Printf("Free EC slots: %d for drive type %s\n", freeEcSlots, diskType)
 		ecNodes = append(ecNodes, &EcNode{
 			info:       dn,
 			dc:         dc,
 			rack:       rack,
+			diskType:   diskType,
 			freeEcSlot: int(freeEcSlots),
 		})
 		totalFreeEcSlots += freeEcSlots
@@ -474,7 +484,7 @@ func ceilDivide(a, b int) int {
 
 func findEcVolumeShards(ecNode *EcNode, vid needle.VolumeId) erasure_coding.ShardBits {
 
-	if diskInfo, found := ecNode.info.DiskInfos[string(types.HardDriveType)]; found {
+	if diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]; found {
 		for _, shardInfo := range diskInfo.EcShardInfos {
 			if needle.VolumeId(shardInfo.Id) == vid {
 				return erasure_coding.ShardBits(shardInfo.EcIndexBits)
@@ -488,7 +498,7 @@ func findEcVolumeShards(ecNode *EcNode, vid needle.VolumeId) erasure_coding.Shar
 func (ecNode *EcNode) addEcVolumeShards(vid needle.VolumeId, collection string, shardIds []uint32) *EcNode {
 
 	foundVolume := false
-	diskInfo, found := ecNode.info.DiskInfos[string(types.HardDriveType)]
+	diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]
 	if found {
 		for _, shardInfo := range diskInfo.EcShardInfos {
 			if needle.VolumeId(shardInfo.Id) == vid {
@@ -505,9 +515,9 @@ func (ecNode *EcNode) addEcVolumeShards(vid needle.VolumeId, collection string, 
 		}
 	} else {
 		diskInfo = &master_pb.DiskInfo{
-			Type: string(types.HardDriveType),
+			Type: string(ecNode.diskType),
 		}
-		ecNode.info.DiskInfos[string(types.HardDriveType)] = diskInfo
+		ecNode.info.DiskInfos[string(ecNode.diskType)] = diskInfo
 	}
 
 	if !foundVolume {
@@ -519,7 +529,7 @@ func (ecNode *EcNode) addEcVolumeShards(vid needle.VolumeId, collection string, 
 			Id:          uint32(vid),
 			Collection:  collection,
 			EcIndexBits: uint32(newShardBits),
-			DiskType:    string(types.HardDriveType),
+			DiskType:    string(ecNode.diskType),
 		})
 		ecNode.freeEcSlot -= len(shardIds)
 	}
@@ -529,7 +539,7 @@ func (ecNode *EcNode) addEcVolumeShards(vid needle.VolumeId, collection string, 
 
 func (ecNode *EcNode) deleteEcVolumeShards(vid needle.VolumeId, shardIds []uint32) *EcNode {
 
-	if diskInfo, found := ecNode.info.DiskInfos[string(types.HardDriveType)]; found {
+	if diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]; found {
 		for _, shardInfo := range diskInfo.EcShardInfos {
 			if needle.VolumeId(shardInfo.Id) == vid {
 				oldShardBits := erasure_coding.ShardBits(shardInfo.EcIndexBits)
@@ -780,7 +790,8 @@ func (ecb *ecBalancer) balanceEcShardsWithinRacks(collection string) error {
 
 			var possibleDestinationEcNodes []*EcNode
 			for _, n := range racks[RackId(rackId)].ecNodes {
-				if _, found := n.info.DiskInfos[string(types.HardDriveType)]; found {
+				// Only include nodes with the same disk type
+				if _, found := n.info.DiskInfos[string(n.diskType)]; found {
 					possibleDestinationEcNodes = append(possibleDestinationEcNodes, n)
 				}
 			}
@@ -842,7 +853,7 @@ func (ecb *ecBalancer) doBalanceEcRack(ecRack *EcRack) error {
 	}
 
 	ecNodeIdToShardCount := groupByCount(rackEcNodes, func(ecNode *EcNode) (id string, count int) {
-		diskInfo, found := ecNode.info.DiskInfos[string(types.HardDriveType)]
+		diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]
 		if !found {
 			return
 		}
@@ -870,12 +881,12 @@ func (ecb *ecBalancer) doBalanceEcRack(ecRack *EcRack) error {
 		if fullNodeShardCount > averageShardCount && emptyNodeShardCount+1 <= averageShardCount {
 
 			emptyNodeIds := make(map[uint32]bool)
-			if emptyDiskInfo, found := emptyNode.info.DiskInfos[string(types.HardDriveType)]; found {
+			if emptyDiskInfo, found := emptyNode.info.DiskInfos[string(emptyNode.diskType)]; found {
 				for _, shards := range emptyDiskInfo.EcShardInfos {
 					emptyNodeIds[shards.Id] = true
 				}
 			}
-			if fullDiskInfo, found := fullNode.info.DiskInfos[string(types.HardDriveType)]; found {
+			if fullDiskInfo, found := fullNode.info.DiskInfos[string(fullNode.diskType)]; found {
 				for _, shards := range fullDiskInfo.EcShardInfos {
 					if _, found := emptyNodeIds[shards.Id]; !found {
 						for _, shardId := range erasure_coding.ShardBits(shards.EcIndexBits).ShardIds() {
@@ -1009,7 +1020,7 @@ func pickNEcShardsToMoveFrom(ecNodes []*EcNode, vid needle.VolumeId, n int) map[
 func (ecb *ecBalancer) collectVolumeIdToEcNodes(collection string) map[needle.VolumeId][]*EcNode {
 	vidLocations := make(map[needle.VolumeId][]*EcNode)
 	for _, ecNode := range ecb.ecNodes {
-		diskInfo, found := ecNode.info.DiskInfos[string(types.HardDriveType)]
+		diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]
 		if !found {
 			continue
 		}
@@ -1024,15 +1035,19 @@ func (ecb *ecBalancer) collectVolumeIdToEcNodes(collection string) map[needle.Vo
 }
 
 func EcBalance(commandEnv *CommandEnv, collections []string, dc string, ecReplicaPlacement *super_block.ReplicaPlacement, maxParallelization int, applyBalancing bool) (err error) {
+	return EcBalanceWithDiskType(commandEnv, collections, dc, ecReplicaPlacement, maxParallelization, applyBalancing, types.HardDriveType)
+}
+
+func EcBalanceWithDiskType(commandEnv *CommandEnv, collections []string, dc string, ecReplicaPlacement *super_block.ReplicaPlacement, maxParallelization int, applyBalancing bool, diskType types.DiskType) (err error) {
 	// collect all ec nodes
-	allEcNodes, totalFreeEcSlots, err := collectEcNodesForDC(commandEnv, dc)
-	fmt.Printf("EC Nodes: %d\n", len(allEcNodes))
+	allEcNodes, totalFreeEcSlots, err := collectEcNodesForDCAndDiskType(commandEnv, dc, diskType)
+	fmt.Printf("EC Nodes: %d (disk type: %s)\n", len(allEcNodes), diskType.ReadableString())
 
 	if err != nil {
 		return err
 	}
 	if totalFreeEcSlots < 1 {
-		return fmt.Errorf("no free ec shard slots in dc `%s`. only %d left", dc, totalFreeEcSlots)
+		return fmt.Errorf("no free ec shard slots in dc `%s` for disk type `%s`. only %d left", dc, diskType.ReadableString(), totalFreeEcSlots)
 	}
 
 	ecb := &ecBalancer{

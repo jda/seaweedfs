@@ -11,6 +11,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/pb/volume_server_pb"
 	"github.com/seaweedfs/seaweedfs/weed/storage/erasure_coding"
 	"github.com/seaweedfs/seaweedfs/weed/storage/needle"
+	"github.com/seaweedfs/seaweedfs/weed/storage/types"
 	"google.golang.org/grpc"
 )
 
@@ -28,7 +29,7 @@ func (c *commandEcRebuild) Name() string {
 func (c *commandEcRebuild) Help() string {
 	return `find and rebuild missing ec shards among volume servers
 
-	ec.rebuild [-c EACH_COLLECTION|<collection_name>] [-force]
+	ec.rebuild [-c EACH_COLLECTION|<collection_name>] [-force] [-disk <disk_type>]
 
 	Algorithm:
 
@@ -63,6 +64,7 @@ func (c *commandEcRebuild) Do(args []string, commandEnv *CommandEnv, writer io.W
 
 	fixCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
 	collection := fixCommand.String("collection", "EACH_COLLECTION", "collection name, or \"EACH_COLLECTION\" for each collection")
+	diskTypeStr := fixCommand.String("disk", "", "disk type for EC operations (empty for default HDD, or specify ssd, nvme, etc.)")
 	applyChanges := fixCommand.Bool("force", false, "apply the changes")
 	if err = fixCommand.Parse(args); err != nil {
 		return nil
@@ -73,8 +75,15 @@ func (c *commandEcRebuild) Do(args []string, commandEnv *CommandEnv, writer io.W
 		return
 	}
 
+	// Convert disk type parameter
+	diskType := types.HardDriveType
+	if *diskTypeStr != "" {
+		diskType = types.ToDiskType(*diskTypeStr)
+		fmt.Printf("Using disk type: %s\n", diskType.ReadableString())
+	}
+
 	// collect all ec nodes
-	allEcNodes, _, err := collectEcNodes(commandEnv)
+	allEcNodes, _, err := collectEcNodesForDCAndDiskType(commandEnv, "", diskType)
 	if err != nil {
 		return err
 	}
@@ -198,7 +207,8 @@ func prepareDataToRecover(commandEnv *CommandEnv, rebuilder *EcNode, collection 
 
 	needEcxFile := true
 	var localShardBits erasure_coding.ShardBits
-	for _, diskInfo := range rebuilder.info.DiskInfos {
+	// Only look at the disk type that matches this rebuilder node
+	if diskInfo, found := rebuilder.info.DiskInfos[string(rebuilder.diskType)]; found {
 		for _, ecShardInfo := range diskInfo.EcShardInfos {
 			if ecShardInfo.Collection == collection && needle.VolumeId(ecShardInfo.Id) == volumeId {
 				needEcxFile = false
@@ -259,7 +269,8 @@ type EcShardMap map[needle.VolumeId]EcShardLocations
 type EcShardLocations [][]*EcNode
 
 func (ecShardMap EcShardMap) registerEcNode(ecNode *EcNode, collection string) {
-	for _, diskInfo := range ecNode.info.DiskInfos {
+	// Only look at the disk type that matches this ecNode
+	if diskInfo, found := ecNode.info.DiskInfos[string(ecNode.diskType)]; found {
 		for _, shardInfo := range diskInfo.EcShardInfos {
 			if shardInfo.Collection == collection {
 				existing, found := ecShardMap[needle.VolumeId(shardInfo.Id)]

@@ -32,7 +32,7 @@ func (c *commandEcDecode) Name() string {
 func (c *commandEcDecode) Help() string {
 	return `decode a erasure coded volume into a normal volume
 
-	ec.decode [-collection=""] [-volumeId=<volume_id>]
+	ec.decode [-collection=""] [-volumeId=<volume_id>] [-disk <disk_type>]
 
 `
 }
@@ -45,15 +45,22 @@ func (c *commandEcDecode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 	decodeCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
 	volumeId := decodeCommand.Int("volumeId", 0, "the volume id")
 	collection := decodeCommand.String("collection", "", "the collection name")
+	diskTypeStr := decodeCommand.String("disk", "", "disk type for EC operations (empty for default HDD, or specify ssd, nvme, etc.)")
 	if err = decodeCommand.Parse(args); err != nil {
 		return nil
+	}
+	infoAboutSimulationMode(writer, false, "")
+
+	// Convert disk type parameter
+	diskType := types.HardDriveType
+	if *diskTypeStr != "" {
+		diskType = types.ToDiskType(*diskTypeStr)
+		fmt.Printf("Using disk type: %s\n", diskType.ReadableString())
 	}
 
 	if err = commandEnv.confirmIsLocked(args); err != nil {
 		return
 	}
-
-	vid := needle.VolumeId(*volumeId)
 
 	// collect topology information
 	topologyInfo, _, err := collectTopologyInfo(commandEnv, 0)
@@ -62,15 +69,15 @@ func (c *commandEcDecode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 	}
 
 	// volumeId is provided
-	if vid != 0 {
-		return doEcDecode(commandEnv, topologyInfo, *collection, vid)
+	if vid := needle.VolumeId(*volumeId); vid != 0 {
+		return doEcDecode(commandEnv, topologyInfo, *collection, vid, diskType)
 	}
 
 	// apply to all volumes in the collection
-	volumeIds := collectEcShardIds(topologyInfo, *collection)
-	fmt.Printf("ec encode volumes: %v\n", volumeIds)
+	volumeIds := collectEcShardIdsByDiskType(topologyInfo, *collection, diskType)
+	fmt.Printf("ec decode volumes: %d\n", len(volumeIds))
 	for _, vid := range volumeIds {
-		if err = doEcDecode(commandEnv, topologyInfo, *collection, vid); err != nil {
+		if err = doEcDecode(commandEnv, topologyInfo, *collection, vid, diskType); err != nil {
 			return err
 		}
 	}
@@ -78,14 +85,14 @@ func (c *commandEcDecode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 	return nil
 }
 
-func doEcDecode(commandEnv *CommandEnv, topoInfo *master_pb.TopologyInfo, collection string, vid needle.VolumeId) (err error) {
+func doEcDecode(commandEnv *CommandEnv, topoInfo *master_pb.TopologyInfo, collection string, vid needle.VolumeId, diskType types.DiskType) (err error) {
 
 	if !commandEnv.isLocked() {
 		return fmt.Errorf("lock is lost")
 	}
 
 	// find volume location
-	nodeToEcIndexBits := collectEcNodeShardBits(topoInfo, vid)
+	nodeToEcIndexBits := collectEcNodeShardBitsByDiskType(topoInfo, vid, diskType)
 
 	fmt.Printf("ec volume %d shard locations: %+v\n", vid, nodeToEcIndexBits)
 
@@ -241,10 +248,14 @@ func lookupVolumeIds(commandEnv *CommandEnv, volumeIds []string) (volumeIdLocati
 }
 
 func collectEcShardIds(topoInfo *master_pb.TopologyInfo, selectedCollection string) (vids []needle.VolumeId) {
+	return collectEcShardIdsByDiskType(topoInfo, selectedCollection, types.HardDriveType)
+}
+
+func collectEcShardIdsByDiskType(topoInfo *master_pb.TopologyInfo, selectedCollection string, diskType types.DiskType) (vids []needle.VolumeId) {
 
 	vidMap := make(map[uint32]bool)
 	eachDataNode(topoInfo, func(dc DataCenterId, rack RackId, dn *master_pb.DataNodeInfo) {
-		if diskInfo, found := dn.DiskInfos[string(types.HardDriveType)]; found {
+		if diskInfo, found := dn.DiskInfos[string(diskType)]; found {
 			for _, v := range diskInfo.EcShardInfos {
 				if v.Collection == selectedCollection {
 					vidMap[v.Id] = true
@@ -253,7 +264,7 @@ func collectEcShardIds(topoInfo *master_pb.TopologyInfo, selectedCollection stri
 		}
 	})
 
-	for vid := range vidMap {
+	for vid, _ := range vidMap {
 		vids = append(vids, needle.VolumeId(vid))
 	}
 
@@ -261,10 +272,14 @@ func collectEcShardIds(topoInfo *master_pb.TopologyInfo, selectedCollection stri
 }
 
 func collectEcNodeShardBits(topoInfo *master_pb.TopologyInfo, vid needle.VolumeId) map[pb.ServerAddress]erasure_coding.ShardBits {
+	return collectEcNodeShardBitsByDiskType(topoInfo, vid, types.HardDriveType)
+}
+
+func collectEcNodeShardBitsByDiskType(topoInfo *master_pb.TopologyInfo, vid needle.VolumeId, diskType types.DiskType) map[pb.ServerAddress]erasure_coding.ShardBits {
 
 	nodeToEcIndexBits := make(map[pb.ServerAddress]erasure_coding.ShardBits)
 	eachDataNode(topoInfo, func(dc DataCenterId, rack RackId, dn *master_pb.DataNodeInfo) {
-		if diskInfo, found := dn.DiskInfos[string(types.HardDriveType)]; found {
+		if diskInfo, found := dn.DiskInfos[string(diskType)]; found {
 			for _, v := range diskInfo.EcShardInfos {
 				if v.Id == uint32(vid) {
 					nodeToEcIndexBits[pb.NewServerAddressFromDataNode(dn)] = erasure_coding.ShardBits(v.EcIndexBits)

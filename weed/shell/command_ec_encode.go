@@ -18,6 +18,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/pb/volume_server_pb"
 	"github.com/seaweedfs/seaweedfs/weed/storage/erasure_coding"
 	"github.com/seaweedfs/seaweedfs/weed/storage/needle"
+	"github.com/seaweedfs/seaweedfs/weed/storage/types"
 )
 
 func init() {
@@ -34,8 +35,8 @@ func (c *commandEcEncode) Name() string {
 func (c *commandEcEncode) Help() string {
 	return `apply erasure coding to a volume
 
-	ec.encode [-collection=""] [-fullPercent=95 -quietFor=1h]
-	ec.encode [-collection=""] [-volumeId=<volume_id>]
+	ec.encode [-collection=""] [-fullPercent=95 -quietFor=1h] [-disk <disk_type>]
+	ec.encode [-collection=""] [-volumeId=<volume_id>] [-disk <disk_type>]
 
 	This command will:
 	1. freeze one volume
@@ -66,6 +67,7 @@ func (c *commandEcEncode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 	collection := encodeCommand.String("collection", "", "the collection name")
 	fullPercentage := encodeCommand.Float64("fullPercent", 95, "the volume reaches the percentage of max volume size")
 	quietPeriod := encodeCommand.Duration("quietFor", time.Hour, "select volumes without no writes for this period")
+	diskTypeStr := encodeCommand.String("disk", "", "disk type for EC operations (empty for default HDD, or specify ssd, nvme, etc.)")
 	maxParallelization := encodeCommand.Int("maxParallelization", DefaultMaxParallelization, "run up to X tasks in parallel, whenever possible")
 	forceChanges := encodeCommand.Bool("force", false, "force the encoding even if the cluster has less than recommended 4 nodes")
 	shardReplicaPlacement := encodeCommand.String("shardReplicaPlacement", "", "replica placement for EC shards, or master default if empty")
@@ -76,6 +78,13 @@ func (c *commandEcEncode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 	}
 	if err = commandEnv.confirmIsLocked(args); err != nil {
 		return
+	}
+
+	// Convert disk type parameter
+	diskType := types.HardDriveType
+	if *diskTypeStr != "" {
+		diskType = types.ToDiskType(*diskTypeStr)
+		fmt.Printf("Using disk type: %s\n", diskType.ReadableString())
 	}
 	rp, err := parseReplicaPlacementArg(commandEnv, *shardReplicaPlacement)
 	if err != nil {
@@ -119,7 +128,7 @@ func (c *commandEcEncode) Do(args []string, commandEnv *CommandEnv, writer io.Wr
 		return fmt.Errorf("ec encode for volumes %v: %v", volumeIds, err)
 	}
 	// ...re-balance ec shards...
-	if err := EcBalance(commandEnv, balanceCollections, "", rp, *maxParallelization, *applyBalancing); err != nil {
+	if err := EcBalanceWithDiskType(commandEnv, balanceCollections, "", rp, *maxParallelization, *applyBalancing, diskType); err != nil {
 		return fmt.Errorf("re-balance ec shards for collection(s) %v: %v", balanceCollections, err)
 	}
 	// ...then delete original volumes.

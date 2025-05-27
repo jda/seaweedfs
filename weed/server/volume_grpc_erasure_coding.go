@@ -142,9 +142,20 @@ func (vs *VolumeServer) VolumeEcShardsCopy(ctx context.Context, req *volume_serv
 
 	var location *storage.DiskLocation
 	if req.CopyEcxFile {
+		// For new EC volumes, try to find a location with free space
+		// First try to find any location that already has EC shards for this volume
 		location = vs.store.FindFreeLocation(func(location *storage.DiskLocation) bool {
-			return location.DiskType == types.HardDriveType
+			if _, found := location.FindEcVolume(needle.VolumeId(req.VolumeId)); found {
+				return true
+			}
+			return false
 		})
+		// If no existing EC volume found, use any free location
+		if location == nil {
+			location = vs.store.FindFreeLocation(func(location *storage.DiskLocation) bool {
+				return true
+			})
+		}
 	} else {
 		location = vs.store.FindFreeLocation(func(location *storage.DiskLocation) bool {
 			//(location.FindEcVolume) This method is error, will cause location is nil, redundant judgment
