@@ -1024,6 +1024,8 @@ func (ecb *ecBalancer) collectVolumeIdToEcNodes(collection string) map[needle.Vo
 func EcBalance(commandEnv *CommandEnv, collections []string, dc string, ecReplicaPlacement *super_block.ReplicaPlacement, maxParallelization int, applyBalancing bool) (err error) {
 	// collect all ec nodes
 	allEcNodes, totalFreeEcSlots, err := collectEcNodesForDC(commandEnv, dc)
+	fmt.Printf("EC Nodes: %d\n", len(allEcNodes))
+
 	if err != nil {
 		return err
 	}
